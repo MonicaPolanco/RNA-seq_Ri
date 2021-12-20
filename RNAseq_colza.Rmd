@@ -1,0 +1,657 @@
+---
+title: "TFM_UOC"
+author: "Mónica Calvo Polanco"
+date: "`r Sys.Date()`"
+output:
+ prettydoc::html_pretty:
+    toc: true
+    theme: cayman
+    highlight: github
+    number_sections: true
+ pdf_document:
+    toc: true
+    toc_depth: 2
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r class.source = 'fold-hide', setup, include=FALSE}
+library(knitr)
+library(rmdformats)
+
+## Global options
+options(max.print="75")
+opts_chunk$set(echo=FALSE,
+	             cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+```
+
+## Instalación de librerías necesarias
+
+El código siguiente muestra la instalación de los paquetes utilizados para el análisis.
+Tan sólo debe ejecutarse una vez!
+
+```{r, librerias, echo=TRUE, eval=FALSE}
+installifnot <- function (pckgName, BioC=TRUE){
+  if(BioC){
+    if(!(require(pckgName, character.only=TRUE))){
+      BiocManager::install(pckgName)
+    }
+  }else{
+    if(!(require(pckgName, character.only=TRUE))){
+      install.packages(pckgName, dep=TRUE)
+    }
+  }
+}
+
+#installifnot("SummarizedExperiment")
+installifnot("DESeq2")
+installifnot("pheatmap")
+installifnot("clusterProfiler")
+installifnot("ggnewscale")
+
+installifnot("dplyr", BioC=FALSE)
+installifnot("gplots", BioC=FALSE)
+installifnot("stringi", BioC=FALSE)
+installifnot("prettydoc", BioC=FALSE)
+```
+
+## Obtención de los datos y selección de las muestras
+
+Supondremos que los archivos se encuentran en la carpeta "datos" y los resultados se escriben a una carpeta "results".
+
+```{r}
+setwd("C:/Users/Usuario/Desktop/Analisis") 
+#if(!dir.exists("datos")) dir.create("datos")
+#if(!dir.exists("results")) dir.create("results") 
+```
+
+Tras copiar los datos en el directorio correspondiente los leeremos, _mirando de convertir las cadenas en factores_.
+
+```{r}
+#install.packages("stringi", type = "win.binary")
+library(stringi)
+library(dplyr)
+counts <- as.matrix(read.csv("datos/Master/genes_counts.csv", sep=";", row.names = 1))
+#colnames(counts) <-paste(c(rep("KELCT7",1),rep("KELCT8",1),rep("KELCT9",1),rep("KELRi10",1),rep("KELRi11",1),rep("KELCRi12",1),rep("WTCT1",1),rep("WTCT2",1),rep("WTCT3",1),rep("WTRi4",1),rep("WTRi5",1),rep("WTRi6",1) ))
+dim(counts)
+table(colnames(counts))
+
+targets <- read.csv("datos/Master/targets.csv", sep=";", row.names = 1)
+targets$Grupo_analisis <- as.factor(targets$Grupo_analisis)
+targets$Group <- as.factor(targets$Group)
+dim(targets)
+
+all(targets$Sample_name %in% colnames(counts))
+all(targets$Sample_name == colnames(counts))
+
+head(targets)
+table(targets$Grupo_analisis)
+```
+
+## Creamos el dataset
+
+
+```{r}
+
+library(DESeq2)
+dds <- DESeqDataSetFromMatrix(countData = counts, colData = targets, design = ~ Group)
+
+keep <- rowSums(counts(dds)) >=10
+dds <- dds[keep]
+dds$Group <- relevel(dds$Group, ref="WTCT") 
+
+```
+
+## Análisis exploratorio
+
+Es habitual, antes de proceder con la visualización de los datos, escalarlos para compensar por la distinta profundidad de secuenciación. 
+
+### Transformaciones de los datos
+
+#### Equilibrando el efecto de la profundidad de secuenciación
+
+La función `estimateSizeFactor'  permite estimar factores de tamaño` que sirven para compensar para las diferencias en profundidad de secuenciación.
+
+```{r}
+dds <- estimateSizeFactors( dds )
+sizeFactors(dds)
+colSums(counts(dds))
+plot(sizeFactors(dds), colSums(counts(dds)))
+abline(lm(colSums(counts(dds)) ~ sizeFactors(dds) + 0))
+```
+
+Obsérvese que dichos factores son valores cercanos al 1 (100%) con un margen de variación que raramente supera el 30%.
+
+#### Pseudocontajes normalizados 
+
+Los datos de contaje son completamente asimétricos,
+
+```{r}
+d<- density(counts(dds)[,1])
+plot(d)
+#boxplot(counts(dds)[,1])
+boxplot(counts(dds), cex=0.5, cex.axis=0.6, las=2, main="Counts sin normalizar", xlab= "Muestras", ylab= "Counts")
+```
+
+Por este motivo es habitual tomar logaritmos de los contajes a los que previamente hemos añadido un 1 (pseudocontajes)
+
+```{r}
+#Usar la otra transformación, como en el ejemplo del curso
+
+logcounts <- log2( counts(dds, normalized=TRUE) + 1 )
+```
+
+Esto nos proporciona una distribución de los datos algo más simétrica.
+
+```{r}
+boxplot(logcounts, cex=0.6, cex.axis=0.5,las=2, xlab= "Muestras", ylab= "Counts", main="Logcounts")
+```
+
+Podemos visualizarlos, por ejemplo, usando una análisis de componentes principales  sobre la matriz traspuesta o un análisis de clusters.
+
+```{r}
+library(ggplot2)
+library(ggrepel)
+plotPCA3 <- function (datos, labels, factor, title, scale,colores, size = 1.5, glineas = 0.25) {
+  data <- prcomp(t(datos),scale=scale)
+  # plot adjustments
+  dataDf <- data.frame(data$x)
+  Group <- factor
+  loads <- round(data$sdev^2/sum(data$sdev^2)*100,1)
+  # main plot
+  p1 <- ggplot(dataDf,aes(x=PC1, y=PC2)) +
+    theme_classic() +
+    geom_hline(yintercept = 0, color = "gray70") +
+    geom_vline(xintercept = 0, color = "gray70") +
+    geom_point(aes(color = Group), alpha = 0.55, size = 3) +
+    coord_cartesian(xlim = c(min(data$x[,1])-5,max(data$x[,1])+5)) +
+    scale_fill_discrete(name = "Group")
+  # avoiding labels superposition
+  p1 + geom_text_repel(aes(y = PC2 + 0.25, label = labels),segment.size = 0.25, size = size) + 
+    labs(x = c(paste("PC1",loads[1],"%")),y=c(paste("PC2",loads[2],"%"))) +  
+    ggtitle(paste("Principal Component Analysis for: ",title,sep=" "))+ 
+    theme(plot.title = element_text(hjust = 0.5)) +
+    scale_color_manual(values=colores)
+  }
+```
+
+
+```{r}
+plotPCA3(logcounts, factor = targets$Group, label=targets$ShortName,
+         title="Logcounts", scale = FALSE, size = 3, 
+         colores = c("red", "blue", "green", "yellow"))
+
+#Otra forma de hacer el PCA
+#library(factoextra)
+#res.pca <- prcomp(logcounts, scale = FALSE)
+#fviz_eig(res.pca)
+
+#fviz_pca_ind(res.pca,
+             #col.ind = "cos2", # Color by the quality of representation
+             #gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             #repel = TRUE     # Avoid text overlapping)
+```
+
+```{r}
+plot(hclust(dist(t(logcounts))), labels=colData(dds)$ShortName, cex=0.5)
+```
+
+
+Finalmente podemos proceder a normalizar los datos usando un modelo de "shrinkage", similar al método "vsn" para microarrays, que permite transformar las varianzas de forma que se vea reducida su heterogeneidad.
+
+```{r}
+rld <- vst( dds )
+class(rld)
+
+rlog<- rlog(dds)
+```
+
+Podemos repetir la visualización con los datos transformados.
+
+```{r}
+plotPCA3(assay(rld), factor = targets$Group, label=targets$ShortName,
+         title="Count data transformed data", scale = FALSE, size = 3, 
+         colores = c("red", "blue", "green", "yellow"))
+
+
+#plot(hclust(dist(rld)), labels=colData(dds)$ShortName, cex=0.5)
+```
+
+
+```{r}
+plotPCA3(assay(rlog), factor = targets$Group, label=targets$ShortName,
+         title="Count data transformed data", scale = FALSE, size = 3, 
+         colores = c("red", "blue", "green", "yellow"))
+
+
+#plot(hclust(dist(t(rlog))), labels=colData(dds)$ShortName, cex=0.5)
+```
+
+## Análisis de expresión diferencial
+
+```{r}
+comparison1<- "KELCTvsWTCT"
+comparison2<- "KELRivsWTCT"
+comparison3<- "WTRivsWTCT"
+comparison4<- "KELRivsKELCT"
+comparison5<- "KELRivsWTRi"
+comparisonNames <- c(comparison1, comparison2, comparison3, comparison4, comparison5)
+design(dds)
+```
+
+
+Los pasos a seguir serán:
+- A partir del objeto que contiene los datos y la matriz de diseño
+- Se ajusta un modelo, en este caso un modelo lineal generalizado para los contajes
+- Con el objeto resultante del ajuste podenmos extraer "topTables" correspondientes a las comparaciones que nos interesan.
+- Estas "topTables" se anotaran para asociar trasncritos con genes con los que hacer análisis posteriores
+- Los análisis pueden consistir en visualizaciones, comparaciones o análisis de significación biológica.
+
+### Selección de transcritos diferencialmente expresados
+
+- Empezamos ajustando un modelo
+
+```{r}
+dds2 <- DESeq(dds)
+res <- results(dds2)
+resultsNames(dds2)
+
+```
+
+# 1. Toptables, volcano plot, MDA para res1 : KELCT - WTCT
+```{r}
+###comparison KELCT - WTCT
+res1 <- results(dds2, contrast = c("Group", "KELCT", "WTCT"))
+#mcols(res1, use.names = TRUE)
+sum(res1$padj < 0.05, na.rm=TRUE)
+
+resLFC_1<- lfcShrink(dds2, contrast=c("Group", "KELCT", "WTCT"), type="normal")
+sum(res1$padj < 0.05, na.rm=TRUE)
+
+#write.table(as.data.frame(res1), sep ="\t", file = "results/final/res1.txt", col.names = TRUE, row.names = TRUE)
+#write.csv(res1, file = "results/final/res1.csv", row.names = TRUE)
+
+#write.table(as.data.frame(resLFC_1), sep ="\t", file = "results/final/resLFC_1.txt", col.names = TRUE, row.names = TRUE)
+#write.csv(res1, file = "results/final/resLFC_1.csv", row.names = TRUE)
+```
+
+```{r}
+# Vocano Plot
+
+par(mar=c(5,5,5,5), cex=0.8, cex.main=1, cex.axis=1, cex.lab=1)
+topT1 <- as.data.frame(resLFC_1)
+topT1<- topT1[complete.cases(topT1), ]
+TopT1<- subset(topT1, padj<0.05, na.rm=TRUE)
+write.csv(TopT1, file="results/final/TopT1.csv", row.names = TRUE)
+
+#Adjusted P values (FDR Q values)
+with(topT1, plot(log2FoldChange, -log10(padj), pch=20, main="Volcano plot KELCT vs WTCT", cex=1.0, xlab=bquote(~Log[2]~fold~change), ylab=bquote(~-log[10]~Q~value)))
+
+with(subset(topT1, padj<0.05 & abs(log2FoldChange)>2, na.rm=TRUE), points(log2FoldChange, -log10(padj), pch=20, col="green", cex=0.5))
+
+#Add lines for absolute FC>2 and P-value cut-off at FDR Q<0.05
+abline(v=0, col="grey", lty=3, lwd=1.0)
+abline(v=-5, col="grey", lty=4, lwd=2.0)
+abline(v=5, col="grey", lty=4, lwd=2.0)
+abline(h=-log10(max(topT1$pvalue[topT1$padj<0.05], na.rm=TRUE)), col="black", lty=4, lwd=2.0)
+```
+
+```{r}
+#MA plot
+plotMA(resLFC_1, ylim=c(-5,5), main = "KELCT vs WTCT", xlab = "mean of normalized counts")
+```
+
+# Comparacion KElRi-WTCT
+
+```{r}
+####comparison KELRi - WTCT
+res2 <- results(dds2, contrast = c("Group", "KELRi", "WTCT"))
+#mcols(res2, use.names = TRUE)
+sum(res2$padj < 0.05, na.rm=TRUE)
+
+resLFC_2<- lfcShrink(dds2, contrast=c("Group", "KELRi", "WTCT"), type="normal")
+sum(res1$padj < 0.05, na.rm=TRUE)
+
+#write.table(as.data.frame(res2), sep ="\t", file = "results/final/res2.txt", col.names = TRUE, row.names = TRUE)
+#write.csv(res2, file = "results/final/res2.csv", row.names = TRUE)
+
+#write.table(as.data.frame(resLFC_2), sep ="\t", file = "results/final/resLFC_2.txt", col.names = TRUE, row.names = TRUE)
+#write.csv(resLFC_2, file = "results/final/resLFC_2.csv", row.names = TRUE)
+```
+```{r}
+# Vocano Plot
+par(mar=c(5,5,5,5), cex=0.8, cex.main=1, cex.axis=1, cex.lab=1)
+topT2 <- as.data.frame(resLFC_2)
+topT2<- topT2[complete.cases(topT2), ]
+TopT2<- subset(topT2, padj<0.05, na.rm=TRUE)
+write.csv(TopT2, file="results/TopT2.csv", row.names = TRUE)
+
+#Adjusted P values (FDR Q values)
+with(topT2, plot(log2FoldChange, -log10(padj), pch=20, main="Volcano plot KELRi vs WTCT", cex=1.0, xlab=bquote(~Log[2]~fold~change), ylab=bquote(~-log[10]~Q~value)))
+
+with(subset(topT2, padj<0.05 & abs(log2FoldChange)>2, na.rm=TRUE), points(log2FoldChange, -log10(padj), pch=20, col="green", cex=0.5))
+
+#Add lines for absolute FC>2 and P-value cut-off at FDR Q<0.05
+abline(v=0, col="grey", lty=3, lwd=1.0)
+abline(v=-5, col="grey", lty=4, lwd=2.0)
+abline(v=5, col="grey", lty=4, lwd=2.0)
+abline(h=-log10(max(topT2$pvalue[topT2$padj<0.05], na.rm=TRUE)), col="black", lty=4, lwd=2.0)
+```
+```{r}
+#MA plot
+plotMA(resLFC_2, ylim=c(-20,20), main = "KELRi vs WTCT", xlab = "mean of normalized counts")
+```
+```
+
+
+```{r}
+# comparison WTRi - WTCT
+res3 <- results(dds2, contrast = c("Group", "WTRi", "WTCT"))
+#mcols(res3, use.names = TRUE)
+sum(res3$padj < 0.05, na.rm=TRUE)
+
+resLFC_3<- lfcShrink(dds2, contrast=c("Group", "WTRi", "WTCT"), type="normal")
+sum(resLFC_3$padj < 0.05, na.rm=TRUE)
+
+#write.table(as.data.frame(res3), sep ="\t", file = "results/final/res3.txt", col.names = TRUE, row.names = TRUE)
+#write.csv(res3, file = "results/final/res3.csv", row.names = TRUE)
+
+#write.table(as.data.frame(resLFC_3), sep ="\t", file = "results/final/resLFC_3.txt", col.names = TRUE, row.names = TRUE)
+#write.csv(resLFC_3, file = "results/final/resLFC_3.csv", row.names = TRUE)
+
+```
+```{r}
+# Vocano Plot
+par(mar=c(5,5,5,5), cex=0.8, cex.main=1, cex.axis=1, cex.lab=1)
+topT3 <- as.data.frame(resLFC_3)
+topT3<- topT3[complete.cases(topT3), ]
+TopT3<- subset(topT3, padj<0.05, na.rm=TRUE)
+write.csv(TopT3, file="results/TopT3.csv", row.names = TRUE)
+
+
+#Adjusted P values (FDR Q values)
+with(topT3, plot(log2FoldChange, -log10(padj), pch=20, main="Volcano plot WTRi vs WTCT", cex=1.0, xlab=bquote(~Log[2]~fold~change), ylab=bquote(~-log[10]~Q~value)))
+
+with(subset(topT3, padj<0.05 & abs(log2FoldChange)>2, na.rm=TRUE), points(log2FoldChange, -log10(padj), pch=20, col="green", cex=0.5))
+
+#Add lines for absolute FC>2 and P-value cut-off at FDR Q<0.05
+abline(v=0, col="grey", lty=3, lwd=1.0)
+abline(v=-2, col="grey", lty=4, lwd=2.0)
+abline(v=2, col="grey", lty=4, lwd=2.0)
+abline(h=-log10(max(topT3$pvalue[topT3$padj<0.05], na.rm=TRUE)), col="black", lty=4, lwd=2.0)
+```
+```{r}
+#MA plot
+plotMA(resLFC_3, ylim=c(-20,20), main = "WTRi vs WTCT", xlab = "mean of normalized counts")
+```
+
+
+```{r}
+####comparison KELRi - KELCT
+res4 <- results(dds2, contrast = c("Group", "KELRi", "KELCT"))
+#mcols(res4, use.names = TRUE)
+sum(res4$padj < 0.05, na.rm=TRUE)
+
+resLFC_4<- lfcShrink(dds2, contrast=c("Group", "KELRi", "KELCT"), type="normal")
+sum(resLFC_4$padj < 0.05, na.rm=TRUE)
+
+#write.table(as.data.frame(res4), sep ="\t", file = "results/final/res4.txt", col.names = TRUE, row.names = TRUE)
+#write.csv(res4, file = "results/final/res4.csv", row.names = TRUE)
+
+#write.table(as.data.frame(resLFC_4), sep ="\t", file = "results/final/resLFC_4.txt", col.names = TRUE, row.names = TRUE)
+#write.csv(resLFC_4, file = "results/final/resLFC_4.csv", row.names = TRUE)
+
+
+```
+```{r}
+# Vocano Plot
+par(mar=c(5,5,5,5), cex=0.8, cex.main=1, cex.axis=1, cex.lab=1)
+topT4 <- as.data.frame(resLFC_4)
+topT4<- topT4[complete.cases(topT4), ]
+TopT4<- subset(topT4, padj<0.05, na.rm=TRUE)
+write.csv(TopT4, file="results/TopT4.csv", row.names = TRUE)
+
+#Adjusted P values (FDR Q values)
+with(topT4, plot(log2FoldChange, -log10(padj), pch=20, main="Volcano plot KELRi vs KELCT", cex=1.0, xlab=bquote(~Log[2]~fold~change), ylab=bquote(~-log[10]~Q~value)))
+
+with(subset(topT4, padj<0.05 & abs(log2FoldChange)>2, na.rm=TRUE), points(log2FoldChange, -log10(padj), pch=20, col="green", cex=0.5))
+
+#Add lines for absolute FC>2 and P-value cut-off at FDR Q<0.05
+abline(v=0, col="grey", lty=3, lwd=1.0)
+abline(v=-5, col="grey", lty=4, lwd=2.0)
+abline(v=5, col="grey", lty=4, lwd=2.0)
+abline(h=-log10(max(topT4$pvalue[topT4$padj<0.05], na.rm=TRUE)), col="black", lty=4, lwd=2.0)
+```
+```{r}
+#MA plot
+plotMA(resLFC_4, ylim=c(-20,20), main = "KELRi vs KELCT", xlab = "mean of normalized counts")
+```
+
+
+
+```{r}
+####comparison KELRi - WTRi
+res5 <- results(dds2, contrast = c("Group", "KELRi", "WTRi"))
+#mcols(res5, use.names = TRUE)
+sum(res5$padj < 0.05, na.rm=TRUE)
+
+resLFC_5<- lfcShrink(dds2, contrast=c("Group", "KELRi", "WTRi"), type="normal")
+sum(resLFC_5$padj < 0.05, na.rm=TRUE)
+
+#write.table(as.data.frame(res5), sep ="\t", file = "results/final/res5.txt", col.names = TRUE, row.names = TRUE)
+#write.csv(res5, file = "results/final/res5.csv", row.names = TRUE)
+
+#write.table(as.data.frame(resLFC_5), sep ="\t", file = "results/final/resLFC_5.txt", col.names = TRUE, row.names = TRUE)
+#write.csv(resLFC_5, file = "results/final/resLFC_5.csv", row.names = TRUE)
+```
+```{r}
+# Vocano Plot
+par(mar=c(5,5,5,5), cex=0.8, cex.main=1, cex.axis=1, cex.lab=1)
+topT5 <- as.data.frame(resLFC_5)
+topT5<- topT5[complete.cases(topT5), ]
+
+TopT5<- subset(topT5, padj<0.05, na.rm=TRUE)
+write.csv(TopT5, file="results/TopT5.csv", row.names = TRUE)
+
+#Adjusted P values (FDR Q values)
+with(topT5, plot(log2FoldChange, -log10(padj), pch=20, main="Volcano plot KELRi vs WTRi", cex=1.0, xlab=bquote(~Log[2]~fold~change), ylab=bquote(~-log[10]~Q~value)))
+
+with(subset(topT5, padj<0.05 & abs(log2FoldChange)>2, na.rm=TRUE), points(log2FoldChange, -log10(padj), pch=20, col="green", cex=0.5))
+
+#Add lines for absolute FC>2 and P-value cut-off at FDR Q<0.05
+abline(v=0, col="grey", lty=3, lwd=1.0)
+abline(v=-2, col="grey", lty=4, lwd=2.0)
+abline(v=2, col="grey", lty=4, lwd=2.0)
+abline(h=-log10(max(topT5$pvalue[topT5$padj<0.05], na.rm=TRUE)), col="black", lty=4, lwd=2.0)
+```
+```{r}
+#MA plot
+plotMA(resLFC_5, ylim=c(-20,20), main = "KELRi vs WTRi", xlab = "mean of normalized counts")
+```
+
+
+### Las listas de genes diferencialmente expresados
+
+
+```{r}
+library(dplyr)
+# KELCTvsWTCT
+Up_KELCTvsWTCT<- subset (resLFC_1, padj < 0.05 & !is.na(log2FoldChange) & log2FoldChange > 1)
+Down_KELCTvsWTCT<- subset (resLFC_1, padj < 0.05 & !is.na(log2FoldChange) & log2FoldChange < -1)
+#write.csv(Up_KELCTvsWTCT, file = "results/final/Up_KELCTvsWTCT.csv", row.names = TRUE)
+#write.csv(Down_KELCTvsWTCT, file = "results/final/Down_KELCTvsWTCT.csv", row.names = TRUE)
+
+
+# KELRivsWTCT
+Up_KELRivsWTCT <- subset (resLFC_2, padj < 0.05 & !is.na(log2FoldChange) & log2FoldChange > 1 )
+Down_KELRivsWTCT <- subset (resLFC_2, padj < 0.05 & !is.na(log2FoldChange) & log2FoldChange < -1 )
+#write.csv(Up_KELRivsWTCT, file = "results/final/Up_KELRivsWTCT.csv", row.names = TRUE)
+#write.csv(Down_KELRivsWTCT, file = "results/final/Down_KELRivsWTCT.csv", row.names = TRUE)
+
+# WTRivsWTCT
+Up_WTRivsWTCT <- subset (resLFC_3, padj < 0.05 & !is.na(log2FoldChange) & log2FoldChange > 1 )
+Down_WTRivsWTCT <- subset (resLFC_3, padj < 0.05 & !is.na(log2FoldChange) & log2FoldChange < -1)
+#write.csv(Up_WTRivsWTCT, file = "results/final/Up_WTRivsWTCT.csv", row.names = TRUE)
+#write.csv(Down_WTRivsWTCT, file = "results/final/Down_WTRivsWTCT.csv", row.names = TRUE)
+
+# KELRivsKELCT
+Up_KELRivsKELCT <- subset (resLFC_4, padj < 0.05 & !is.na(log2FoldChange) & log2FoldChange > 1 )
+Down_KELRivsKELCT <- subset (resLFC_4, padj < 0.05 & !is.na(log2FoldChange) & log2FoldChange < -1 )
+
+#write.csv(Up_KELRivsKELCT, file = "results/final/Up_KELRivsKELCT.csv", row.names = TRUE)
+#write.csv(Down_KELRivsKELCT, file = "results/final/Down_KELRivsKELCT.csv", row.names = TRUE)
+
+# KELRivsWTRi
+Up_KELRivsWTRi <- subset (resLFC_5, padj < 0.05 & !is.na(log2FoldChange) & log2FoldChange > 1 )
+Down_KELRivsWTRi <- subset (resLFC_5, padj < 0.05 & !is.na(log2FoldChange) & log2FoldChange > 1 )
+#write.csv(Up_KELRivsWTRi, file = "results/final/Up_KELRivsWTRi.csv", row.names = TRUE)
+#write.csv(Down_KELRivsWTRi, file = "results/final/Down_KELRivsWTRi.csv", row.names = TRUE)
+
+```
+
+### Visualización conjunta de los resultados
+#### Venn Chart 
+Tengo diferentes warnings mientras hago los diagramas. Que por ahora son muy sencillos...
+
+
+
+```{r}
+library(gplots)
+# Comparación KELCTvsWTCT - KELRivsWTCT
+transcritsList_1up <- list(Up_KELCTvsWTCT,Up_KELRivsWTCT) 
+names(transcritsList_1up)<- c(comparison1, comparison2)
+v.table_1up<- venn(transcritsList_1up)
+
+transcritsList_1down <- list(Down_KELCTvsWTCT,Down_KELRivsWTCT) 
+names(transcritsList_1down)<- c(comparison1, comparison2)
+v.table_1down<- venn(transcritsList_1down)
+
+# Comparación KELCTvsWTCT - KELRivsWTCT
+transcritsList_2up<- list(Up_KELRivsWTCT,Up_WTRivsWTCT) 
+names(transcritsList_2up)<- c(comparison2, comparison3)
+v.table_2up<- venn(transcritsList_2up)
+
+transcritsList_2down<- list(Down_KELRivsWTCT,Down_WTRivsWTCT) 
+names(transcritsList_2down)<- c(comparison2, comparison3)
+v.table_2down<- venn(transcritsList_2down)
+
+# Comparación KELRivsKELCT - WTRivsWTCT
+transcritsList_3up<- list(Up_KELRivsKELCT , Up_WTRivsWTCT)
+names(transcritsList_3up)<- c(comparison4, comparison3)
+v.table_3up<- venn(transcritsList_3up)
+
+transcritsList_3down<- list(Down_KELRivsKELCT , Down_WTRivsWTCT)
+names(transcritsList_3down)<- c(comparison4, comparison3)
+v.table_3down<- venn(transcritsList_3down)
+
+
+```
+
+#### Heatmap
+
+```{r}
+
+# Al correr este programa, solo me coge unas muestras del tipo KEL, las KELCT y no el resto.
+library("pheatmap")
+
+Data1 <- as.data.frame(Up_KELCTvsWTCT)
+Data1[order(Data1$log2FoldChange, decreasing=TRUE), ]
+
+topGenes_1<- rownames(Data1)[1:50]
+head(topGenes_1)
+sampleinfo1 <- subset(targets, Myco=="NoMyc")
+
+mat1  <- logcounts[topGenes_1, sampleinfo1$Name]
+
+mat1  <- mat1 - rowMeans(mat1)
+anno1 <- sampleinfo1[, c("Type","Myco")]
+rownames(anno1) <- sampleinfo1$Name
+pheatmap(mat1, annotation_col = anno1)
+
+```
+
+
+```{r}
+library("pheatmap")
+
+Data2 <- as.data.frame(Up_KELRivsKELCT)
+Data2[order(Data2$log2FoldChange, decreasing=TRUE), ]
+
+topGenes_2<- rownames(Data2)[1:50]
+head(topGenes_2)
+sampleinfo2 <- subset(targets, Type=="KEL")
+
+mat2  <- logcounts[topGenes_2, sampleinfo2$Name]
+mat2  <- mat2 - rowMeans(mat2)
+
+anno2 <- sampleinfo2[, c("Myco","Type")]
+
+rownames(anno2) <- sampleinfo2$Name
+
+pheatmap(mat2, annotation_col = anno2)
+```
+
+```{r}
+library("pheatmap")
+
+Data3 <- as.data.frame(Down_KELRivsKELCT)
+Data3[order(Data3$log2FoldChange, decreasing=FALSE), ]
+
+topGenes_3<- rownames(Data3)[1:50]
+head(topGenes_2)
+sampleinfo3 <- subset(targets, Type=="KEL")
+
+mat3  <- logcounts[topGenes_3, sampleinfo3$Name]
+mat3  <- mat3 - rowMeans(mat3)
+
+anno3 <- sampleinfo3[, c("Myco","Type")]
+
+rownames(anno3) <- sampleinfo3$Name
+
+pheatmap(mat3, annotation_col = anno3)
+```
+
+
+```{r}
+Data4 <- as.data.frame(Up_WTRivsWTCT)
+Data4[order(Data4$log2FoldChange, decreasing=TRUE), ]
+
+topGenes_4<- rownames(Data4)[1:25]
+head(topGenes_4)
+sampleinfo4 <- subset(targets, Type=="WT")
+
+mat4  <- logcounts[topGenes_4, sampleinfo4$Name]
+mat4  <- mat4 - rowMeans(mat4)
+
+anno4 <- sampleinfo4[, c("Myco","Type")]
+rownames(anno4) <- sampleinfo4$Name
+pheatmap(mat4, annotation_col = anno4)
+
+```
+
+
+```{r}
+Data5 <- as.data.frame(Down_WTRivsWTCT)
+Data5[order(Data5$log2FoldChange, decreasing=FALSE), ]
+
+topGenes_5<- rownames(Data5)[1:25]
+head(topGenes_5)
+sampleinfo5 <- subset(targets, Type=="WT")
+
+mat5  <- logcounts[topGenes_5, sampleinfo5$Name]
+
+mat5  <- mat5 - rowMeans(mat5)
+
+anno5 <- sampleinfo5[, c("Myco","Type")]
+
+rownames(anno5) <- sampleinfo5$Name
+pheatmap(mat5, annotation_col = anno5)
+```
+
